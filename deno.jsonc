@@ -1,0 +1,19 @@
+{
+  "imports": {
+    "std/encoding/hex": "jsr:@std/encoding/hex"
+  },
+  "tasks": {
+    "run": "deno run --allow-read --allow-write --allow-net --allow-env src/cli.ts"
+  },
+  "lint": {
+    "rules": {
+      "tags": ["recommended"],
+      "include": ["src"]
+    }
+  },
+  "fmt": {
+    "files": {
+      "include": ["src"]
+    }
+  }
+}
