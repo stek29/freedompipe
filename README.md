@@ -11,7 +11,7 @@ a pipeline of tools to parse and ingest PDFs from Freedom Banker app into ZenMon
 
 CLI tool that reads normalized transaction JSON, resolves/creates ZenMoney accounts, pairs transfers/conversions, and emits `/v8/diff` payloads.
 
-It should be fully idempotent, only creating transactions which are missing or have been deleted. If you want deleted transactions to stay gone on reruns, enable `--consider-deleted`/`ZEN_CONSIDER_DELETED_TRANSACTIONS=1`.
+It should be fully idempotent, only creating transactions that are missing. Deleted transactions stay gone on reruns by default; if you want them recreated, pass `--ignore-deleted` / `ZEN_IGNORE_DELETED_TRANSACTIONS=1`.
 
 
 ## Quick start
@@ -31,7 +31,7 @@ deno task run --input transactions.json --company-id 15492 --dry-run
 - `ZEN_REQUIRE_CONVERSION_HINT=0` / `--no-conversion-hint`: Allow FX pairing without “Конвертация” hint.
 - `ZEN_ENABLE_FX_PAIRING=0` / `--no-fx` / `--no-fx-pairing`: Disable FX pairing altogether.
 - `ZEN_FX_MAX_REL_DELTA` / `--fx-max-rel-delta`: FX pairing tolerance (default `0.15`).
-- `ZEN_CONSIDER_DELETED_TRANSACTIONS=1` / `--consider-deleted`: Include deleted transactions when deduping by bankID to prevent re-creating transactions you explicitly deleted on reruns (default: ignore deleted for idempotency).
+- `ZEN_IGNORE_DELETED_TRANSACTIONS=1` / `--ignore-deleted`: Recreate transactions you've deleted by ignoring them during bankID dedupe (default: keep deleted transactions skipped so they stay gone).
 
 ## Notes
 - Dry-run still fetches the latest snapshot, updates the rate cache, but does not persist state or post the diff.

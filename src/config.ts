@@ -17,7 +17,7 @@ const defaultConfig: Config = {
     return Number.isFinite(parsed) ? parsed : 0.15;
   })(),
   considerDeletedTransactions:
-    Deno.env.get("ZEN_CONSIDER_DELETED_TRANSACTIONS") === "1",
+    Deno.env.get("ZEN_IGNORE_DELETED_TRANSACTIONS") === "1" ? false : true,
 };
 
 export function loadConfig(overrides: Partial<Config> = {}): Config {

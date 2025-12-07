@@ -72,8 +72,8 @@ function parseArgs(argv: string[]): CliArgs {
         break;
       case "--no-cleared":
         break;
-      case "--consider-deleted":
-        args.considerDeletedTransactions = true;
+      case "--ignore-deleted":
+        args.considerDeletedTransactions = false;
         break;
       case "--fx-max-rel-delta":
         args.fxMaxRelDelta = Number(argv[++i]);
@@ -112,7 +112,7 @@ Options:
   --no-conversion-hint         Allow FX pairing without conversion hint
   --no-fx, --no-fx-pairing     Disable FX pairing altogether
   --fx-max-rel-delta <number>  FX pairing tolerance (default: 0.15)
-  --consider-deleted           Include deleted txns when deduping bankIDs
+  --ignore-deleted             Ignore deleted txns when deduping bankIDs (default: consider deleted)
   -h, --help                   Show this message and exit
 `);
 }
