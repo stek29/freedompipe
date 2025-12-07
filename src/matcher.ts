@@ -11,8 +11,8 @@ export function pairSameCurrency(
   outcomes: NormalizedTransaction[],
 ): TransferPair[] {
   const pairs: TransferPair[] = [];
-  const sortedIncome = [...incomes].sort(stableKey);
-  const sortedOutcome = [...outcomes].sort(stableKey);
+  const sortedIncome = [...incomes].sort(stableCompare);
+  const sortedOutcome = [...outcomes].sort(stableCompare);
 
   const keyFor = (tx: NormalizedTransaction): string =>
     `${tx.docNumber}|${tx.txnDate}|${tx.accountCurrency}|${tx.amount.toFixed(2)}`;
@@ -49,8 +49,8 @@ export async function pairFx(
   const usedIncome = new Set<string>();
   const usedOutcome = new Set<string>();
 
-  const sortedIncome = [...incomes].sort(stableKey);
-  const sortedOutcome = [...outcomes].sort(stableKey);
+  const sortedIncome = [...incomes].sort(stableCompare);
+  const sortedOutcome = [...outcomes].sort(stableCompare);
 
   const toBaseValue = async (tx: NormalizedTransaction): Promise<number | null> => {
     const rate = await safeGetRate(getRate, tx.txnDate, tx.accountCurrency, BASE);
@@ -92,6 +92,16 @@ export async function pairFx(
 
 function stableKey(tx: NormalizedTransaction): string {
   return `${tx.txnDate}-${tx.amount.toFixed(2)}-${tx.docNumber}`;
+}
+
+function stableCompare(
+  a: NormalizedTransaction,
+  b: NormalizedTransaction,
+): number {
+  const aKey = stableKey(a);
+  const bKey = stableKey(b);
+  if (aKey === bKey) return 0;
+  return aKey < bKey ? -1 : 1;
 }
 
 async function safeGetRate(

@@ -1,6 +1,6 @@
 import { Config } from "./types.ts";
 
-const defaultConfig: Partial<Config> = {
+const defaultConfig: Config = {
   apiBase: "https://api.zenmoney.ru/v8",
   token: Deno.env.get("ZENMONEY_TOKEN") ?? null,
   statePath: Deno.env.get("ZEN_STATE_PATH") ?? "state.json",
@@ -8,9 +8,7 @@ const defaultConfig: Partial<Config> = {
   dryRun: Deno.env.get("ZEN_DRY_RUN") === "1",
   dryRunOutput: Deno.env.get("ZEN_DRY_RUN_OUTPUT") ?? undefined,
   syncerPrefix: Deno.env.get("ZEN_SYNC_PREFIX") ?? "fp-sync",
-  companyId: Deno.env.get("ZEN_COMPANY_ID")
-    ? Number(Deno.env.get("ZEN_COMPANY_ID"))
-    : null,
+  companyId: Number(Deno.env.get("ZEN_COMPANY_ID")),
   requireConversionHint: Deno.env.get("ZEN_REQUIRE_CONVERSION_HINT") !== "0",
   enableFxPairing: Deno.env.get("ZEN_ENABLE_FX_PAIRING") !== "0",
   fxMaxRelDelta: (() => {
