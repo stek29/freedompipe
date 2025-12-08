@@ -1,21 +1,7 @@
 import { loadConfig } from "./config.ts";
 import { loadJsonTransactions } from "./loader.ts";
 import { normalizeInput } from "./parser.ts";
-import {
-  CachedRateProvider,
-  CbrRateProvider,
-  CompositeRateProvider,
-  ExchangeApiRateProvider,
-  RateStore,
-} from "./rates.ts";
-import { buildDiff } from "./sync.ts";
-import {
-  buildEmptyDiff,
-  fetchDiff,
-  mergeSnapshot,
-  StateStore,
-} from "./state.ts";
-import { DiffRequest } from "./types.ts";
+import { initSyncContext, runSync } from "./runner.ts";
 
 type CliArgs = {
   input?: string;
@@ -117,21 +103,6 @@ Options:
 `);
 }
 
-async function maybeRefreshSnapshot(
-  token: string | null,
-  state: StateStore,
-  apiBase: string,
-) {
-  let snapshot = state.snapshot();
-  if (!token) {
-    return snapshot;
-  }
-  const emptyDiff: DiffRequest = buildEmptyDiff(snapshot.serverTimestamp);
-  const response = await fetchDiff(apiBase, token, emptyDiff);
-  snapshot = mergeSnapshot(snapshot, response);
-  return snapshot;
-}
-
 async function main() {
   const args = parseArgs(Deno.args);
   if (args.showHelp) {
@@ -163,27 +134,7 @@ async function main() {
     throw new Error("Company id is required (set ZEN_COMPANY_ID or --company)");
   }
 
-  const stateStore = new StateStore(config.statePath);
-  await stateStore.load();
-  let snapshot = await maybeRefreshSnapshot(
-    config.token,
-    stateStore,
-    config.apiBase,
-  );
-
-  if (!snapshot.serverTimestamp && !config.token) {
-    throw new Error(
-      "No cached state available and token missing; cannot proceed",
-    );
-  }
-
-  const rateStore = new RateStore(config.rateCachePath);
-  await rateStore.load();
-  const upstreamRates = new CompositeRateProvider([
-    new CbrRateProvider(),
-    new ExchangeApiRateProvider(),
-  ]);
-  const rateProvider = new CachedRateProvider(rateStore, upstreamRates);
+  const ctx = await initSyncContext(config);
 
   const records = await loadJsonTransactions(args.input!);
   const normalized = await normalizeInput(
@@ -191,37 +142,23 @@ async function main() {
     config.syncerPrefix,
   );
 
-  const { diff, accountSyncMap } = await buildDiff(
-    normalized,
-    snapshot,
-    config,
-    (date, from, to) => rateProvider.getRate(date, from, to),
-  );
+  const result = await runSync(normalized, config, ctx);
 
-  const accountCount = diff.account?.length ?? 0;
-  const txnCount = diff.transaction?.length ?? 0;
-
-  if (config.dryRun) {
-    const output = JSON.stringify(diff, null, 2);
+  if (result.dryRun) {
+    const output = JSON.stringify(result.diff, null, 2);
     if (config.dryRunOutput) {
       await Deno.writeTextFile(config.dryRunOutput, output);
       console.log(
-        `Dry-run diff written to ${config.dryRunOutput} (accounts=${accountCount}, txns=${txnCount})`,
+        `Dry-run diff written to ${config.dryRunOutput} (accounts=${result.counts.accounts}, txns=${result.counts.transactions})`,
       );
     } else {
       console.log(output);
     }
-    await rateStore.save();
     return;
   }
 
-  const response = await fetchDiff(config.apiBase, config.token!, diff);
-  snapshot = mergeSnapshot(snapshot, response);
-  const mergedSyncMap = { ...stateStore.accountSyncMap(), ...accountSyncMap };
-  await stateStore.save(snapshot, mergedSyncMap);
-  await rateStore.save();
   console.log(
-    `Sync completed. Accounts sent=${accountCount}, txns sent=${txnCount}. Server timestamp: ${response.serverTimestamp}`,
+    `Sync completed. Accounts sent=${result.counts.accounts}, txns sent=${result.counts.transactions}. Server timestamp: ${result.serverTimestamp}`,
   );
 }
 

@@ -1,5 +1,16 @@
 import { Config } from "./types.ts";
 
+export interface SyncOptions {
+  dryRun?: boolean;
+  token?: string;
+  syncPrefix?: string;
+  requireConversionHint?: boolean;
+  enableFxPairing?: boolean;
+  fxMaxRelDelta?: number;
+  considerDeletedTransactions?: boolean;
+  companyId?: number;
+}
+
 const defaultConfig: Config = {
   apiBase: "https://api.zenmoney.ru/v8",
   token: Deno.env.get("ZENMONEY_TOKEN") ?? null,
@@ -22,4 +33,27 @@ const defaultConfig: Config = {
 
 export function loadConfig(overrides: Partial<Config> = {}): Config {
   return { ...defaultConfig, ...overrides };
+}
+
+export function applySyncOptions(
+  baseConfig: Config,
+  options: SyncOptions,
+  token: string | null,
+): Config {
+  const companyId = options.companyId ?? baseConfig.companyId;
+  if (typeof companyId !== "number" || Number.isNaN(companyId)) {
+    throw new Error("Company id is required (options.company_id)");
+  }
+  return loadConfig({
+    dryRun: options.dryRun ?? baseConfig.dryRun,
+    token,
+    syncerPrefix: options.syncPrefix ?? baseConfig.syncerPrefix,
+    requireConversionHint: options.requireConversionHint ??
+      baseConfig.requireConversionHint,
+    enableFxPairing: options.enableFxPairing ?? baseConfig.enableFxPairing,
+    fxMaxRelDelta: options.fxMaxRelDelta ?? baseConfig.fxMaxRelDelta,
+    considerDeletedTransactions: options.considerDeletedTransactions ??
+      baseConfig.considerDeletedTransactions,
+    companyId,
+  });
 }
