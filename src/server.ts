@@ -50,6 +50,9 @@ function parseServerArgs(argv: string[]): Partial<Config> {
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
     switch (arg) {
+      case "--dry-run":
+        overrides.dryRun = true;
+        break;
       case "--state":
         overrides.statePath = argv[++i];
         break;
@@ -193,6 +196,7 @@ async function handleSync(
   headers: Headers,
   ctx: SyncContext,
   baseConfig: ReturnType<typeof loadConfig>,
+  enforceDryRun: boolean,
   mutex: Mutex,
   path: string,
   requestId: string,
@@ -203,6 +207,9 @@ async function handleSync(
   });
   const { transactions, options } = parseBody(payload);
   const parsedOptions = parseRawOptions(options);
+  if (enforceDryRun && parsedOptions.dryRun !== true) {
+    throw new HttpError(403, "Server is running in dry-run mode");
+  }
   const redactedRawOptions = { ...options };
   if ("token" in redactedRawOptions) {
     redactedRawOptions.token = "<redacted>";
@@ -308,9 +315,11 @@ async function start() {
   const baseConfig = loadConfig(parseServerArgs(Deno.args));
   const ctx = await initSyncContext(baseConfig);
   const mutex = new Mutex();
+  const enforceDryRun = baseConfig.dryRun;
   const hostname = Deno.env.get("ZEN_HOST") ?? "0.0.0.0";
   const parsedPort = Number(Deno.env.get("ZEN_PORT") ?? "8936");
   const port = Number.isFinite(parsedPort) ? parsedPort : 8936;
+  const startupConfig = { ...baseConfig, token: baseConfig.token ? "<redacted>" : null };
 
   const app = new Application();
   const router = new Router();
@@ -330,6 +339,7 @@ async function start() {
       context.request.headers,
       ctx,
       baseConfig,
+      enforceDryRun,
       mutex,
       url.pathname,
       reqId,
@@ -387,7 +397,7 @@ async function start() {
     context.response.body = { status: "error", message: "Not found" };
   });
 
-  console.log(JSON.stringify({ event: "listening", hostname, port }));
+  console.log(JSON.stringify({ event: "server_start", hostname, port, config: startupConfig }));
   await app.listen({ hostname, port });
 }
 
