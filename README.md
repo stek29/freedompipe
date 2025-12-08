@@ -52,6 +52,9 @@ deno task run --input transactions.json --company-id 15492 --dry-run
 1. Go to https://zerro.app, authorize, then copy the token from https://zerro.app/token
 2. Go to https://budgera.com, authorize, then copy the API key in settings
 
+## TODO
+- Consider transactions present in ZenMoney when merging in case we were ran with incomplete data earlier
+
 # Freedom Finance PDF file extractor
 `extract_transactions.py` -- using `pdfplumber` extract tables of transactions and other metadata  (like account number and currency).
 
