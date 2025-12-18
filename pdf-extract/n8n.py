@@ -4,7 +4,13 @@ n8n Code node (Python, Native).
 Input:
     - Run Once for All Items
     - Each item has a PDF statement in binary:
-        item["binary"]["attachment_0"]["data"]  -> base64-encoded PDF bytes
+        - base64 mode:
+            item["binary"]["attachment_0"]["data"]  -> base64-encoded PDF bytes
+        - filesystem-v2 mode:
+            item["binary"]["attachment_0"]["data"] == "filesystem-v2"
+            item["binary"]["attachment_0"]["id"]   -> "filesystem-v2:<relative_path_under_storage>"
+            and BINARY_DATA_STORAGE_PATH must point to the binary storage directory
+            (usually ".../n8n/binaryData")
 
 Output:
     - One n8n item per transaction:
@@ -28,7 +34,7 @@ Output:
     - Sorted by (date, document_number, account_iban, source, page)
 
 needs n8n runners config env-overrides, i.e.:
-    "N8N_RUNNERS_STDLIB_ALLOW": "base64,io,json,re,dataclasses,datetime,decimal,enum,typing,_strptime,time",
+    "N8N_RUNNERS_STDLIB_ALLOW": "base64,io,json,re,dataclasses,datetime,decimal,enum,typing,_strptime,time,pathlib",
     "N8N_RUNNERS_EXTERNAL_ALLOW": "pdfplumber",
     "N8N_RUNNERS_BUILTINS_DENY": ""
 """
@@ -40,7 +46,8 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import List, Optional
+from pathlib import Path
+from typing import List, Optional, Union
 
 import pdfplumber
 
@@ -49,6 +56,10 @@ import pdfplumber
 
 # Name of the binary property containing the PDF
 BINARY_PROPERTY_NAME = "attachment_0"
+
+# Path to n8n binary storage root (used for filesystem-v2).
+# Set this to your n8n binaryData directory (e.g. "/home/runner/binaryData").
+BINARY_DATA_STORAGE_PATH = "/n8n-binary-data"
 
 
 TABLE_SETTINGS = {
@@ -75,9 +86,13 @@ class Column(Enum):
     DOCUMENT_NUMBER = ColumnSpec("document_number", "Номер документа")
     BANK_NAME = ColumnSpec("bank_name", "Наименование банка бенефициара/получателя")
     BANK_BIC = ColumnSpec("bank_bic", "БИК банка бенефициара/получателя")
-    COUNTERPARTY_NAME = ColumnSpec("counterparty_name", "Наименование бенефициара/отправителя")
+    COUNTERPARTY_NAME = ColumnSpec(
+        "counterparty_name", "Наименование бенефициара/отправителя"
+    )
     COUNTERPARTY_BIN = ColumnSpec("counterparty_bin", "БИН/ИИН бенефициара/отправителя")
-    COUNTERPARTY_ACCOUNT = ColumnSpec("counterparty_account", "Номер счета бенефициара/отправителя")
+    COUNTERPARTY_ACCOUNT = ColumnSpec(
+        "counterparty_account", "Номер счета бенефициара/отправителя"
+    )
     DEBIT = ColumnSpec("debit", "Дебет", True)
     CREDIT = ColumnSpec("credit", "Кредит", True)
     DESCRIPTION = ColumnSpec("description", "Назначение платежа")
@@ -174,7 +189,9 @@ def detect_account_type(text: str) -> str:
     return "unknown"
 
 
-def extract_statement_metadata(pdf: pdfplumber.PDF, source_name: str) -> StatementMetadata:
+def extract_statement_metadata(
+    pdf: pdfplumber.PDF, source_name: str
+) -> StatementMetadata:
     if not pdf.pages:
         raise ValueError(f"В файле {source_name} нет страниц")
 
@@ -207,7 +224,10 @@ def extract_statement_metadata(pdf: pdfplumber.PDF, source_name: str) -> Stateme
 
 
 def is_data_row(cells: List[str]) -> bool:
-    return len(cells) > COLUMN_INDEX[Column.DESCRIPTION] and parse_date(cells[COLUMN_INDEX[Column.DATE]]) is not None
+    return (
+        len(cells) > COLUMN_INDEX[Column.DESCRIPTION]
+        and parse_date(cells[COLUMN_INDEX[Column.DATE]]) is not None
+    )
 
 
 def is_summary_row(cells: List[str]) -> bool:
@@ -222,13 +242,15 @@ def parse_summary_count(cells: List[str]) -> Optional[int]:
     return None
 
 
-def extract_transactions_from_pdf_bytes(pdf_bytes: bytes, source_name: str) -> List[Transaction]:
-    """Extract transactions from PDF bytes (in-memory)."""
+def extract_transactions_from_pdf_source(
+    binary_source: Union[Path, io.BytesIO], source_name: str
+) -> List[Transaction]:
+    """Extract transactions from a PDF source accepted by pdfplumber (Path or BytesIO)."""
     transactions: List[Transaction] = []
     final_summary_count: Optional[int] = None
     column_indices = COLUMN_INDEX
 
-    with pdfplumber.open(io.BytesIO(pdf_bytes)) as pdf:
+    with pdfplumber.open(binary_source) as pdf:
         metadata = extract_statement_metadata(pdf, source_name)
         for page_number, page in enumerate(pdf.pages, start=1):
             tables = page.extract_tables(TABLE_SETTINGS) or []
@@ -249,7 +271,9 @@ def extract_transactions_from_pdf_bytes(pdf_bytes: bytes, source_name: str) -> L
                 elif header_is_summary(header_normalized):
                     continue
                 elif not is_data_row(rows[0]):
-                    print(f"WARNING: Skipping table with unexpected header on {source_name} page {page_number}")
+                    print(
+                        f"WARNING: Skipping table with unexpected header on {source_name} page {page_number}"
+                    )
                     continue
 
                 expected_count = None
@@ -273,7 +297,9 @@ def extract_transactions_from_pdf_bytes(pdf_bytes: bytes, source_name: str) -> L
                     bank_bic = cells[column_indices[Column.BANK_BIC]]
                     counterparty_name = cells[column_indices[Column.COUNTERPARTY_NAME]]
                     counterparty_bin = cells[column_indices[Column.COUNTERPARTY_BIN]]
-                    counterparty_account = cells[column_indices[Column.COUNTERPARTY_ACCOUNT]]
+                    counterparty_account = cells[
+                        column_indices[Column.COUNTERPARTY_ACCOUNT]
+                    ]
                     description = cells[column_indices[Column.DESCRIPTION]]
 
                     debit = parse_amount(cells[column_indices[Column.DEBIT]])
@@ -347,6 +373,59 @@ def serialize_core_fields(tx: Transaction) -> dict:
     return data
 
 
+def get_n8n_binary_source(file_entry: dict) -> Union[Path, io.BytesIO]:
+    """
+    Return an n8n binary source.
+
+    For inline mode this returns an in-memory BytesIO wrapping the decoded bytes.
+    For filesystem-v2 mode this returns a Path pointing to the stored binary file.
+
+    Supports:
+      - Inline base64: {"data": "<base64...>"}
+      - filesystem-v2: {"data": "filesystem-v2", "id": "filesystem-v2:<fileId>"}
+
+    For filesystem-v2, BINARY_DATA_STORAGE_PATH must be set to the n8n binary storage directory.
+    """
+    binary_id = file_entry.get("id")
+    if binary_id:
+        if ":" not in binary_id:
+            raise ValueError("Binary 'id' is not in '<mode>:<fileId>' format")
+        mode, file_id = binary_id.split(":", 1)
+
+        if mode in {"filesystem-v2", "filesystem"}:
+            if not BINARY_DATA_STORAGE_PATH:
+                raise ValueError(
+                    "BINARY_DATA_STORAGE_PATH must be set for filesystem-v2 binary data"
+                )
+            base_path = Path(BINARY_DATA_STORAGE_PATH).resolve()
+            file_path = (base_path / file_id).resolve()
+            if base_path != file_path and base_path not in file_path.parents:
+                raise ValueError(
+                    f"Disallowed filesystem-v2 path outside storage root: {file_id}"
+                )
+
+            if not file_path.is_file():
+                raise ValueError(f"filesystem-v2 binary file not found: {file_path}")
+            return file_path
+
+        raise ValueError(f"Unsupported binary storage mode '{mode}'")
+
+    b64_data = file_entry.get("data")
+    if not b64_data:
+        raise ValueError("Binary entry has no 'data' field")
+
+    if b64_data == "filesystem-v2":
+        raise ValueError(
+            "Binary entry uses filesystem-v2 but has no 'id' field; cannot locate binary file"
+        )
+
+    try:
+        raw = base64.b64decode(b64_data)
+    except Exception as exc:
+        raise ValueError(f"Failed to base64-decode PDF: {exc}") from exc
+    return io.BytesIO(raw)
+
+
 # === Main logic for n8n ===
 
 input_items = _items  # list of incoming items
@@ -356,36 +435,17 @@ rows_for_sort: List[dict] = []
 for idx, item in enumerate(input_items):
     binary = item.get("binary") or {}
     if not binary:
-        print(f"WARNING: Item {idx} has no binary data, skipping")
-        continue
+        raise ValueError(f"Item {idx} has no binary data")
 
     file_entry = binary.get(BINARY_PROPERTY_NAME)
     if file_entry is None:
-        # fall back to the first binary property if specific one is missing
-        try:
-            file_entry = next(iter(binary.values()))
-        except StopIteration:
-            print(f"WARNING: Item {idx} binary object is empty, skipping")
-            continue
-
-    b64_data = file_entry.get("data")
-    if not b64_data:
-        print(f"WARNING: Item {idx} binary entry has no 'data' field, skipping")
-        continue
-
-    try:
-        pdf_bytes = base64.b64decode(b64_data)
-    except Exception as exc:
-        print(f"ERROR: Failed to base64-decode PDF for item {idx}: {exc}")
-        continue
+        raise ValueError(
+            f"Item {idx} missing expected binary property '{BINARY_PROPERTY_NAME}'"
+        )
 
     source_name = file_entry.get("fileName") or f"item_{idx}.pdf"
-
-    try:
-        transactions: List[Transaction] = extract_transactions_from_pdf_bytes(pdf_bytes, source_name)
-    except ValueError as exc:
-        print(f"ERROR: {exc}")
-        continue
+    binary_source = get_n8n_binary_source(file_entry)
+    transactions = extract_transactions_from_pdf_source(binary_source, source_name)
 
     for tx in transactions:
         row = serialize_core_fields(tx)
