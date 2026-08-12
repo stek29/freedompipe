@@ -1,0 +1,8 @@
+.git
+.vscode
+venv
+ignored
+zenmoney-api-docs
+pdf-extract
+.pycache
+*.md
