@@ -58,6 +58,8 @@ class Column(Enum):
 
 COLUMN_ORDER = tuple(Column)
 EXPECTED_HEADERS = [column.value.header for column in COLUMN_ORDER]
+COMPACT_HEADERS = ["дата операции", "номер документа", "сумма", "назначение платежа"]
+COMPACT_TOTAL_RE = re.compile(r"^\s*(Дебет|Кредит)\s*:\s*(.*?)\s*$", re.IGNORECASE)
 COLUMN_INDEX = {column: idx for idx, column in enumerate(COLUMN_ORDER)}
 CSV_FIELD_ORDER = METADATA_FIELDS + [column.value.attr for column in COLUMN_ORDER]
 
@@ -196,10 +198,65 @@ def parse_summary_count(cells: List[str]) -> Optional[int]:
     return None
 
 
+def verify_compact_totals(pdf: pdfplumber.PDF, transactions: List[Transaction], source_name: str) -> None:
+    statement_totals = {}
+    for page in pdf.pages:
+        for line in (page.extract_text() or "").splitlines():
+            match = COMPACT_TOTAL_RE.fullmatch(line)
+            if match:
+                amount = parse_amount(normalize_cell(match.group(2)))
+                if amount is None or not amount.is_finite():
+                    raise ValueError(f"Invalid statement total in {source_name}")
+                statement_totals[match.group(1).casefold()] = abs(amount)
+
+    totals = {
+        "дебет": sum(tx.debit for tx in transactions if tx.debit is not None),
+        "кредит": sum(tx.credit for tx in transactions if tx.credit is not None),
+    }
+    if statement_totals != totals:
+        raise ValueError(f"Transaction totals do not match the statement in {source_name}")
+
+
+def parse_compact_row(
+    cells: List[str], metadata: StatementMetadata, source_name: str, page: int
+) -> Optional[Transaction]:
+    # Merged footer cells appear in the first column.
+    if len(cells) == len(COMPACT_HEADERS) and not any(cells[1:]):
+        return None
+    if len(cells) != len(COMPACT_HEADERS):
+        raise ValueError(f"Unexpected compact row width in {source_name} on page {page}")
+    date, document_number, signed_amount, description = cells
+    parsed_date = parse_date(date)
+    amount = parse_amount(signed_amount)
+    if not parsed_date or not document_number or amount is None or not amount.is_finite():
+        raise ValueError(f"Invalid transaction row in {source_name} on page {page}")
+    return Transaction(
+        account_iban=metadata.account_iban,
+        account_currency=metadata.account_currency,
+        account_type=metadata.account_type,
+        date=parsed_date,
+        document_number=document_number,
+        bank_name="",
+        bank_bic="",
+        counterparty_name="",
+        counterparty_bin="",
+        counterparty_account="",
+        debit=-amount if amount < 0 else None,
+        credit=amount if amount >= 0 else None,
+        description=description,
+        source=source_name,
+        page=page,
+    )
+
+
 def extract_transactions_from_pdf(pdf_path: Path, logger: logging.Logger) -> List[Transaction]:
+    source_name = pdf_path.name
     transactions: List[Transaction] = []
     final_summary_count: Optional[int] = None
     column_indices = COLUMN_INDEX
+    compact = False
+    detailed = False
+
     with pdfplumber.open(pdf_path) as pdf:
         metadata = extract_statement_metadata(pdf, pdf_path)
         for page_number, page in enumerate(pdf.pages, start=1):
@@ -214,19 +271,35 @@ def extract_transactions_from_pdf(pdf_path: Path, logger: logging.Logger) -> Lis
                     continue
 
                 header_normalized = normalize_header(rows[0])
+                compact_header = [cell.casefold() for cell in header_normalized] == COMPACT_HEADERS
+                compact_continuation = (
+                    compact and len(rows[0]) == len(COMPACT_HEADERS) and parse_date(rows[0][0])
+                )
+                if compact_header or compact_continuation:
+                    compact = True
+                    for cells in rows[1:] if compact_header else rows:
+                        transaction = parse_compact_row(cells, metadata, source_name, page_number)
+                        if transaction is not None:
+                            transactions.append(transaction)
+                    continue
+
                 use_rows = rows
 
                 if headers_match(header_normalized):
+                    detailed = True
                     use_rows = rows[1:]
                 elif header_is_summary(header_normalized):
+                    summary_count = parse_summary_count(rows[0])
+                    if summary_count is not None:
+                        final_summary_count = summary_count
                     continue
                 elif not is_data_row(rows[0]):
                     logger.warning(
-                        "Skipping table with unexpected header on %s page %s",
-                        pdf_path.name,
-                        page_number,
+                        "Skipping table with unexpected header on %s page %s", source_name, page_number
                     )
                     continue
+                else:
+                    detailed = True
 
                 expected_count = None
                 if use_rows and is_summary_row(use_rows[-1]):
@@ -249,7 +322,9 @@ def extract_transactions_from_pdf(pdf_path: Path, logger: logging.Logger) -> Lis
                     bank_bic = cells[column_indices[Column.BANK_BIC]]
                     counterparty_name = cells[column_indices[Column.COUNTERPARTY_NAME]]
                     counterparty_bin = cells[column_indices[Column.COUNTERPARTY_BIN]]
-                    counterparty_account = cells[column_indices[Column.COUNTERPARTY_ACCOUNT]]
+                    counterparty_account = cells[
+                        column_indices[Column.COUNTERPARTY_ACCOUNT]
+                    ]
                     description = cells[column_indices[Column.DESCRIPTION]]
 
                     debit = parse_amount(cells[column_indices[Column.DEBIT]])
@@ -273,7 +348,7 @@ def extract_transactions_from_pdf(pdf_path: Path, logger: logging.Logger) -> Lis
                             debit=debit,
                             credit=credit,
                             description=description,
-                            source=pdf_path.name,
+                            source=source_name,
                             page=page_number,
                         )
                     )
@@ -283,22 +358,18 @@ def extract_transactions_from_pdf(pdf_path: Path, logger: logging.Logger) -> Lis
                     if current_total != expected_count:
                         logger.warning(
                             "Summary count mismatch on %s page %s: expected %s, got %s",
-                            pdf_path.name,
-                            page_number,
-                            expected_count,
-                            current_total,
+                            source_name, page_number, expected_count, current_total,
                         )
-    if not transactions and final_summary_count is None:
-        logger.warning("No transactions found in %s", pdf_path)
-    elif not transactions and final_summary_count == 0:
-        pass
-    elif final_summary_count is not None and final_summary_count != len(transactions):
-        logger.warning(
-            "Final summary count mismatch on %s: expected %s, got %s",
-            pdf_path.name,
-            final_summary_count,
-            len(transactions),
-        )
+
+        if compact:
+            if detailed:
+                raise ValueError(f"Mixed transaction table layouts in {source_name}")
+            verify_compact_totals(pdf, transactions, source_name)
+        elif final_summary_count is not None and final_summary_count != len(transactions):
+            raise ValueError(f"Transaction count does not match the statement in {source_name}")
+        elif not transactions and final_summary_count != 0:
+            raise ValueError(f"No recognized transactions or empty statement totals in {source_name}")
+
     return transactions
 
 
